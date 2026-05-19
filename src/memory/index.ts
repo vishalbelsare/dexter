@@ -10,6 +10,8 @@ import type {
   MemorySearchOptions,
   MemorySearchResult,
   MemorySessionContext,
+  TemporalDecayConfig,
+  MMRConfig,
 } from './types.js';
 import { getSetting } from '../utils/config.js';
 
@@ -25,6 +27,9 @@ const DEFAULT_CONFIG: MemoryRuntimeConfig = {
   vectorWeight: 0.7,
   textWeight: 0.3,
   watchDebounceMs: 1500,
+  temporalDecay: { enabled: true, halfLifeDays: 30 },
+  mmr: { enabled: true, lambda: 0.7 },
+  indexSessions: true,
 };
 
 type MemorySettings = {
@@ -32,6 +37,9 @@ type MemorySettings = {
   embeddingProvider?: MemoryRuntimeConfig['embeddingProvider'];
   embeddingModel?: string;
   maxSessionContextTokens?: number;
+  temporalDecay?: Partial<TemporalDecayConfig>;
+  mmr?: Partial<MMRConfig>;
+  indexSessions?: boolean;
 };
 
 function resolveConfig(): MemoryRuntimeConfig {
@@ -39,6 +47,8 @@ function resolveConfig(): MemoryRuntimeConfig {
   return {
     ...DEFAULT_CONFIG,
     ...(settings ?? {}),
+    temporalDecay: { ...DEFAULT_CONFIG.temporalDecay, ...(settings?.temporalDecay ?? {}) },
+    mmr: { ...DEFAULT_CONFIG.mmr, ...(settings?.mmr ?? {}) },
   };
 }
 
@@ -77,24 +87,32 @@ export class MemoryManager {
 
     try {
       this.db = await MemoryDatabase.create(`${this.store.getMemoryDir()}/index.sqlite`);
-      const fingerprint = client ? `${client.provider}:${client.model}` : 'none:none';
-      if (this.db.getProviderFingerprint() !== fingerprint) {
-        this.db.clearEmbeddings();
-        this.db.setProviderFingerprint(fingerprint);
-      }
-
-      this.indexer = new MemoryIndexer(this.store, this.db, {
-        chunkTokens: this.config.chunkTokens,
-        overlapTokens: this.config.chunkOverlapTokens,
-        watchDebounceMs: this.config.watchDebounceMs,
-        embeddingClient: client,
-      });
-      this.indexer.startWatching();
-      await this.indexer.sync({ force: false });
     } catch (error) {
       this.initError = error instanceof Error ? error.message : String(error);
       this.db = null;
       this.indexer = null;
+      return;
+    }
+
+    const fingerprint = client ? `${client.provider}:${client.model}` : 'none:none';
+    if (this.db.getProviderFingerprint() !== fingerprint) {
+      this.db.clearEmbeddings();
+      this.db.setProviderFingerprint(fingerprint);
+    }
+
+    this.indexer = new MemoryIndexer(this.store, this.db, {
+      chunkTokens: this.config.chunkTokens,
+      overlapTokens: this.config.chunkOverlapTokens,
+      watchDebounceMs: this.config.watchDebounceMs,
+      embeddingClient: client,
+      indexSessions: this.config.indexSessions,
+    });
+    this.indexer.startWatching();
+
+    try {
+      await this.indexer.sync({ force: false });
+    } catch (error) {
+      this.initError = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -141,6 +159,8 @@ export class MemoryManager {
         vectorWeight: this.config.vectorWeight,
         textWeight: this.config.textWeight,
       },
+      temporalDecay: this.config.temporalDecay,
+      mmr: this.config.mmr,
     });
   }
 
